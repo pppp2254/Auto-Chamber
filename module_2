@@ -1,0 +1,135 @@
+from machine import Pin, I2C
+import ssd1306
+import time
+from umqtt.simple import MQTTClient
+import dht
+
+#topic
+MQTT_BROKER = "your_mqtt_broker_address"
+MAINPOWER_STATUS_TOPIC = "mainpower_status"
+BATTERY_RELAY_TOPIC = "battery_relay_control"
+PUMP_CONTROL_TOPIC = "pump_control"
+LED_CONTROL_TOPIC = "led_control"
+DHT11_TOPIC = "sensor/dht11"
+DHT22_TOPIC = "sensor/dht22"
+LDR_TOPIC = "sensor/ldr"
+WATER_DENSITY_TOPIC = "water_density"  
+TARGET_LIGHT_TOPIC = "target_light"  
+LIGHT_SCALE_TOPIC = "light_scale"  
+
+
+DHT11_PIN = 12
+DHT22_PIN = 13
+LDR_PIN = 34
+PUMP_PIN = 26
+LED_PIN1 = 25
+LED_PIN2 = 27
+BATTERY_RELAY_PIN = 33
+I2C_SDA_PIN = 21
+I2C_SCL_PIN = 22
+
+# Setup
+i2c = I2C(0, scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN), freq=400000)
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+
+dht11_sensor = dht.DHT11(Pin(DHT11_PIN))
+dht22_sensor = dht.DHT22(Pin(DHT22_PIN))
+ldr = Pin(LDR_PIN, Pin.IN)
+
+pump_relay = Pin(PUMP_PIN, Pin.OUT)
+led1_relay = Pin(LED_PIN1, Pin.OUT)
+led2_relay = Pin(LED_PIN2, Pin.OUT)
+battery_relay = Pin(BATTERY_RELAY_PIN, Pin.OUT)
+
+# MQTT 
+client = MQTTClient("esp32_client", MQTT_BROKER)
+
+# var
+target_density = 80  
+target_light = 500  
+light_scale = 1.0 
+
+def mqtt_callback(topic, msg):
+    global target_density, target_light, light_scale
+    if topic == MAINPOWER_STATUS_TOPIC:
+        pass  
+    elif topic == PUMP_CONTROL_TOPIC:
+        pump_relay.on() if msg == b'ON' else pump_relay.off()
+    elif topic == LED_CONTROL_TOPIC:
+        led1_relay.on() if msg == b'ON' else led1_relay.off()
+        led2_relay.on() if msg == b'ON' else led2_relay.off()
+    elif topic == BATTERY_RELAY_TOPIC:
+        battery_relay.on() if msg == b'SWITCH' else battery_relay.off()
+    elif topic == WATER_DENSITY_TOPIC:
+        target_density = int(msg)
+    elif topic == TARGET_LIGHT_TOPIC:
+        target_light = int(msg)
+    elif topic == LIGHT_SCALE_TOPIC:
+        light_scale = float(msg)
+
+client.set_callback(mqtt_callback)
+client.connect()
+client.subscribe(MAINPOWER_STATUS_TOPIC)
+client.subscribe(PUMP_CONTROL_TOPIC)
+client.subscribe(LED_CONTROL_TOPIC)
+client.subscribe(BATTERY_RELAY_TOPIC)
+client.subscribe(WATER_DENSITY_TOPIC)
+client.subscribe(TARGET_LIGHT_TOPIC)
+client.subscribe(LIGHT_SCALE_TOPIC)
+
+def read_sensors():
+    dht11_sensor.measure()
+    dht22_sensor.measure()
+    ldr_value = ldr.value()
+    
+    dht11_temp = dht11_sensor.temperature()
+    dht11_humidity = dht11_sensor.humidity()
+    dht22_temp = dht22_sensor.temperature()
+    dht22_humidity = dht22_sensor.humidity()
+
+    return {
+        'dht11_temp': dht11_temp,
+        'dht11_humidity': dht11_humidity,
+        'dht22_temp': dht22_temp,
+        'dht22_humidity': dht22_humidity,
+        'ldr_value': ldr_value
+    }
+
+def display_status(sensors):
+    oled.fill(0)
+    oled.text(f"Main Power: {client.check_msg()}", 0, 0)
+    oled.text(f"DHT11 Temp: {sensors['dht11_temp']}C", 0, 10)
+    oled.text(f"DHT11 Hum: {sensors['dht11_humidity']}%", 0, 20)
+    oled.text(f"DHT22 Temp: {sensors['dht22_temp']}C", 0, 30)
+    oled.text(f"DHT22 Hum: {sensors['dht22_humidity']}%", 0, 40)
+    oled.text(f"LDR Value: {sensors['ldr_value']}", 0, 50)
+    oled.text(f"Target Density: {target_density}", 0, 60)
+    oled.text(f"Target Light: {target_light}", 0, 70)
+    oled.text(f"Light Scale: {light_scale}", 0, 80)
+    oled.show()
+
+# Main
+while True:
+    client.check_msg()
+    sensors = read_sensors()
+    display_status(sensors)
+
+    # Publish sensor data
+    client.publish(DHT11_TOPIC, str(sensors['dht11_temp']))
+    client.publish(DHT22_TOPIC, str(sensors['dht22_temp']))
+    client.publish(LDR_TOPIC, str(sensors['ldr_value']))
+
+    # Control pump 
+    if sensors['ldr_value'] < target_density:  
+        pump_relay.on()
+    else:
+        pump_relay.off()
+
+    # Control LED
+    if sensors['ldr_value'] < target_light * light_scale:  
+        led1_relay.on()
+        led2_relay.on()
+    else:
+        led1_relay.off()
+        led2_relay.off()
+
