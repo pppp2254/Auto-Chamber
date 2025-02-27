@@ -1,0 +1,99 @@
+from machine import Pin, ADC, PWM
+from time import sleep
+
+sw = Pin(2, Pin.IN, Pin.PULL_UP)
+red = PWM(Pin(42, Pin.OUT))
+yellow = PWM(Pin(41, Pin.OUT))
+green = PWM(Pin(40, Pin.OUT))
+
+ldr = ADC(Pin(4))
+ldr.atten(ADC.ATTN_11DB)
+ldr.width(ADC.WIDTH_12BIT)
+
+min_value = 4095
+max_value = 0
+min_count = 0
+max_count = 0
+CONFIRM_COUNT = 3  
+
+def update_min_max(ldr_value):
+    global min_value, max_value, min_count, max_count
+
+    if ldr_value < min_value:
+        min_count += 1
+        if min_count >= CONFIRM_COUNT:
+            min_value = ldr_value
+            min_count = 0
+    else:
+        min_count = 0  
+
+    if ldr_value > max_value:
+        max_count += 1
+        if max_count >= CONFIRM_COUNT:
+            max_value = ldr_value
+            max_count = 0
+    else:
+        max_count = 0  
+
+def get_levels():
+    range_size = max_value - min_value
+    if range_size < 100:
+        return min_value + 10, min_value + 20, min_value + 30, min_value + 40, min_value + 50, min_value + 60
+
+    step = range_size // 6
+    return (
+        max_value - step,
+        max_value - 2 * step,
+        max_value - 3 * step,
+        max_value - 4 * step,
+        max_value - 5 * step,
+        min_value
+    )
+
+def light_stage(ldr_value):
+    red_half, red_max, yellow_half, yellow_max, green_half, green_max = get_levels()
+
+    if ldr_value < green_max:
+        return "Green max", green
+    elif ldr_value < green_half:
+        return "Green half", green
+    elif ldr_value < yellow_max:
+        return "Yellow max", yellow
+    elif ldr_value < yellow_half:
+        return "Yellow half", yellow
+    elif ldr_value < red_max:
+        return "Red max", red
+    elif ldr_value < red_half:
+        return "Red half", red
+    else:
+        return "Out of range", None
+
+for led in [red, yellow, green]:
+    led.freq(1000)
+    led.duty_u16(0)
+
+current_led = green
+led_order = [green, yellow, red]
+
+while True:
+    ldr_value = ldr.read()
+    update_min_max(ldr_value)
+
+    stage, next_led = light_stage(ldr_value)
+    print(f"Light Stage: {stage} | LDR Value: {ldr_value} | Min: {min_value} | Max: {max_value}")
+
+    if not sw.value():
+        sleep(0.05)
+        while not sw.value():
+            pass
+        current_led.duty_u16(0)
+        current_led = led_order[(led_order.index(current_led) + 1) % len(led_order)]
+        current_led.duty_u16(2048)
+
+    if next_led and next_led != current_led:
+        current_led.duty_u16(0)
+        current_led = next_led
+        current_led.duty_u16(4095)
+
+    sleep(0.05)
+
