@@ -1,0 +1,10 @@
+from machine import Pin, ADC
+import time
+# setup
+sensor_pin = ADC(Pin(34))  
+sensor_pin.atten(ADC.ATTN_0DB)  # ADC input range (0-3.3V)
+# main loop
+while True:
+    value = sensor_pin.read()  # read analog
+    print("ADC Value:", value)  
+    time.sleep(1)
