@@ -1,0 +1,18 @@
+import time
+from machine import Pin
+import dht
+
+time.sleep(2) 
+dht_sensor = dht.DHT22(Pin(4))  
+
+while True:
+    try:
+        time.sleep(2) 
+        dht_sensor.measure()
+        temp = dht_sensor.temperature()
+        hum = dht_sensor.humidity()
+        print(f"Temp: {temp}C, Humidity: {hum}%")
+    except Exception as e:
+        print("DHT22 read error:", str(e))
+    
+    time.sleep(2)
