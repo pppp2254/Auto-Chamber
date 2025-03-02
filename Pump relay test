@@ -1,0 +1,13 @@
+from machine import Pin
+import time
+
+relay = Pin(5, Pin.OUT)  
+
+while True:
+    relay.value(0) 
+    print("Relay ON")
+    time.sleep(5)  
+    
+    relay.value(1)  
+    print("Relay OFF")
+    time.sleep(5)  
