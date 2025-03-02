@@ -1,0 +1,159 @@
+from machine import Pin, I2C, ADC
+import ssd1306
+import time
+from umqtt.simple import MQTTClient
+import dht
+import neopixel
+
+# MQTT Topics
+MQTT_BROKER = "your_mqtt_broker_address"
+MAINPOWER_STATUS_TOPIC = "mainpower_status"
+PUMP_CONTROL_TOPIC = "pump_control"
+LED_CONTROL_TOPIC = "led_control"
+SOIL_MOISTURE_TOPIC = "sensor/soil_moisture"
+DHT22_TOPIC = "sensor/dht22"
+LDR_TOPIC = "sensor/ldr"
+WATER_DENSITY_TOPIC = "water_density"  
+TARGET_LIGHT_TOPIC = "target_light"  
+LIGHT_SCALE_TOPIC = "light_scale"  
+# auto or manual
+PUMP_MODE_TOPIC = "pump_mode"  # auto
+LIGHT_MODE_TOPIC = "light_mode" 
+MANUAL_PUMP_TOPIC = "manual_pump"  # manual
+MANUAL_LIGHT_TOPIC = "manual_light" 
+
+# Pin Definitions
+SOIL_MOISTURE_PIN = 36 
+DHT22_PIN = 13
+LDR_PIN = 34
+PUMP_PIN = 26  
+NEOPIXEL_PIN = 5  
+MAIN_POWER_PIN = 25  # relay channel 1 and 2 
+I2C_SDA_PIN = 21
+I2C_SCL_PIN = 22
+
+# Setup
+i2c = I2C(0, scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN), freq=400000)
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+
+soil_moisture_sensor = ADC(Pin(SOIL_MOISTURE_PIN))
+soil_moisture_sensor.atten(ADC.ATTN_11DB)  
+
+dht22_sensor = dht.DHT22(Pin(DHT22_PIN))
+ldr = Pin(LDR_PIN, Pin.IN)
+
+# Relay Setup
+main_power_relay = Pin(MAIN_POWER_PIN, Pin.OUT)  # relay channel 1 and 2
+pump_relay = Pin(PUMP_PIN, Pin.OUT)  # single channel pump relay 
+
+# NeoPixel Setup
+np = neopixel.NeoPixel(Pin(NEOPIXEL_PIN), 12)  
+brightness = 50  # init brightness 
+
+# MQTT 
+client = MQTTClient("esp32_client", MQTT_BROKER)
+
+# Default Variables
+target_density = 80  
+target_light = 500  
+light_scale = 1.0 
+pump_mode = "auto"  # default mode: auto
+light_mode = "auto"  # default mode: auto
+manual_pump_state = False  # default manual pump state: OFF
+manual_light_state = False  # default manual light state: OFF
+
+def mqtt_callback(topic, msg):
+    global target_density, target_light, light_scale, brightness, pump_mode, light_mode, manual_pump_state, manual_light_state
+    msg = msg.decode()  
+
+    if topic == MAINPOWER_STATUS_TOPIC:
+        main_power_relay.on() if msg == 'ON' else main_power_relay.off()
+    elif topic == PUMP_MODE_TOPIC:
+        pump_mode = msg  # Set pump mode (auto or manual)
+    elif topic == LIGHT_MODE_TOPIC:
+        light_mode = msg  # Set light mode (auto or manual)
+    elif topic == MANUAL_PUMP_TOPIC:
+        manual_pump_state = True if msg == 'ON' else False  # manual pump state
+    elif topic == MANUAL_LIGHT_TOPIC:
+        manual_light_state = True if msg == 'ON' else False  # manual light state
+    elif topic == WATER_DENSITY_TOPIC:
+        target_density = int(msg)
+    elif topic == TARGET_LIGHT_TOPIC:
+        target_light = int(msg)
+    elif topic == LIGHT_SCALE_TOPIC:
+        light_scale = float(msg)
+
+client.set_callback(mqtt_callback)
+client.connect()
+client.subscribe(MAINPOWER_STATUS_TOPIC)
+client.subscribe(PUMP_MODE_TOPIC)
+client.subscribe(LIGHT_MODE_TOPIC)
+client.subscribe(MANUAL_PUMP_TOPIC)
+client.subscribe(MANUAL_LIGHT_TOPIC)
+client.subscribe(WATER_DENSITY_TOPIC)
+client.subscribe(TARGET_LIGHT_TOPIC)
+client.subscribe(LIGHT_SCALE_TOPIC)
+
+def read_sensors():
+    dht22_sensor.measure()
+    ldr_value = ldr.value()
+    soil_moisture_value = soil_moisture_sensor.read()
+    
+    dht22_temp = dht22_sensor.temperature()
+    dht22_humidity = dht22_sensor.humidity()
+
+    return {
+        'soil_moisture': soil_moisture_value,
+        'dht22_temp': dht22_temp,
+        'dht22_humidity': dht22_humidity,
+        'ldr_value': ldr_value
+    }
+
+def display_status(sensors):
+    oled.fill(0)
+    oled.text(f"Main Power: {'ON' if main_power_relay.value() else 'OFF'}", 0, 0)
+    oled.text(f"Pump Mode: {pump_mode}", 0, 10)
+    oled.text(f"Light Mode: {light_mode}", 0, 20)
+    oled.text(f"Soil Moisture: {sensors['soil_moisture']}", 0, 30)
+    oled.text(f"DHT22 Temp: {sensors['dht22_temp']}C", 0, 40)
+    oled.text(f"DHT22 Hum: {sensors['dht22_humidity']}%", 0, 50)
+    oled.text(f"LDR Value: {sensors['ldr_value']}", 0, 60)
+    oled.text(f"Target Density: {target_density}", 0, 70)
+    oled.text(f"Target Light: {target_light}", 0, 80)
+    oled.show()
+
+# Main Loop
+while True:
+    client.check_msg()
+    sensors = read_sensors()
+    display_status(sensors)
+
+    # Publish sensor data
+    client.publish(SOIL_MOISTURE_TOPIC, str(sensors['soil_moisture']))
+    client.publish(DHT22_TOPIC, str(sensors['dht22_temp']))
+    client.publish(LDR_TOPIC, str(sensors['ldr_value']))
+
+    # Control pump mode
+    if pump_mode == "auto":
+        if sensors['soil_moisture'] < target_density:  
+            pump_relay.on()
+        else:
+            pump_relay.off()
+    else:  # Manual mode
+        pump_relay.on() if manual_pump_state else pump_relay.off()
+
+    # Control NeoPixel mode
+    if light_mode == "auto":
+        if sensors['ldr_value'] < target_light * light_scale:  
+            np.fill((brightness, brightness, brightness))  # Set NeoPixel brightness
+            np.write()
+        else:
+            np.fill((0, 0, 0))  # Turn off NeoPixel
+            np.write()
+    else:  # Manual mode
+        if manual_light_state:
+            np.fill((brightness, brightness, brightness))  # Set NeoPixel brightness
+            np.write()
+        else:
+            np.fill((0, 0, 0))  # Turn off NeoPixel
+            np.write()
