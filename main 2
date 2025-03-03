@@ -38,7 +38,7 @@ oled = ssd1306.SSD1306_I2C(128, 64, i2c)
 
 soil_moisture_sensor = ADC(Pin(SOIL_MOISTURE_PIN))
 soil_moisture_sensor.atten(ADC.ATTN_11DB)
-soil_moisture_sensor = 4095 - soil_moisture_sensor 
+soil_moisture_sensor = (4095 - soil_moisture_sensor)*(100 / 4095) 
 
 dht22_sensor = dht.DHT22(Pin(DHT22_PIN))
 ldr = Pin(LDR_PIN, Pin.IN)
