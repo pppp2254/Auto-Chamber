@@ -1,0 +1,242 @@
+from machine import Pin, ADC
+import time
+from umqtt.simple import MQTTClient
+import dht
+import neopixel
+import network
+
+# Pin Definitions
+SOIL_MOISTURE_PIN = 5
+DHT22_PIN = 15
+LDR_PIN = 7
+PUMP_PIN = 12  
+NEOPIXEL_PIN = 20   
+MAIN_POWER_PIN = 39  # Main power relay
+EXT_POWER_PIN = 38  # External power relay
+red = Pin(42, Pin.OUT)
+yellow = Pin(41, Pin.OUT)
+green = Pin(40, Pin.OUT)
+sw = Pin(2, Pin.IN, Pin.PULL_UP)
+
+# Setup
+# Global Variables
+target_light = 500  
+light_scale = 1.0  
+pump_mode = "auto"
+light_mode = "auto"
+manual_pump = False
+manual_light = False
+mainpower_status = None 
+soil_moisture_sensor = ADC(Pin(SOIL_MOISTURE_PIN))
+soil_moisture_sensor.atten(ADC.ATTN_11DB)  # Set attenuation for full range (0-3.3V)
+dht22_sensor = dht.DHT22(Pin(DHT22_PIN))
+ldr = ADC(Pin(LDR_PIN))
+ldr.atten(ADC.ATTN_11DB)  # Set attenuation for full range (0-3.3V)
+ldr.width(ADC.WIDTH_12BIT)  # Set 12-bit resolution
+min_value = 4095
+max_value = 0
+min_count = 0
+max_count = 0
+main_power = 0
+CONFIRM_COUNT = 3
+
+# Relay Setup
+main_power_relay = Pin(MAIN_POWER_PIN, Pin.OUT)
+ext_power_relay = Pin(EXT_POWER_PIN, Pin.OUT)
+pump_relay = Pin(PUMP_PIN, Pin.OUT)
+
+# NeoPixel Setup
+# np = neopixel.NeoPixel(Pin(NEOPIXEL_PIN), 12)
+bright_level = 127  # Default brightness (0-255)
+
+# MQTT Setup
+MQTT_BROKER = "iot.cpe.ku.ac.th"
+MQTT_USER = "b6710504310"
+MQTT_PASS = "ratchapol.san@ku.th"
+MQTT_PREFIX = "b6710504310"
+WIFI_SSID = 'KUWIN-IOT'
+WIFI_PASS = ''
+
+MAINPOWER_STATUS_TOPIC = "b6710504310/volt/stage"
+PUMP_CONTROL_TOPIC = "b6710504310/pump_control"
+LED_CONTROL_TOPIC = "b6710504310/led_control"
+SOIL_MOISTURE_TOPIC = "b6710504310/sensor/soil_moisture"
+DHT22_TOPIC = "b6710504310/sensor/dht22"
+LDR_TOPIC = "b6710504310/sensor/ldr"
+WATER_DENSITY_TOPIC = "b6710504310/water_density"  
+TARGET_LIGHT_TOPIC = "b6710504310/target_light"  
+LIGHT_SCALE_TOPIC = "b6710504310/light_scale"  
+PUMP_MODE_TOPIC = "b6710504310/pump_mode"  # auto
+LIGHT_MODE_TOPIC = "b6710504310/light_mode" 
+MANUAL_PUMP_TOPIC = "b6710504310/manual_pump"  # manual
+MANUAL_LIGHT_TOPIC = "b6710504310/manual_light"  
+
+# Global variable to store the last published moisture value
+last_published_moisture = None
+
+client = MQTTClient("esp32_client", MQTT_BROKER, user=MQTT_USER, password=MQTT_PASS)
+wifi = network.WLAN(network.STA_IF)
+
+def connect_wifi():
+    mac = ':'.join(f'{b:02X}' for b in wifi.config('mac'))
+    print(f'WiFi MAC address is {mac}')
+    wifi.active(True)
+    print(f'Connecting to WiFi {WIFI_SSID}.')
+    wifi.connect(WIFI_SSID, WIFI_PASS)
+    while not wifi.isconnected():
+        print('.', end='')
+        time.sleep(0.5)
+    print('\nWiFi connected.')
+
+def connect_mqtt():
+    print(f'Connecting to MQTT broker at {MQTT_BROKER}.')
+    client.connect()
+    client.set_callback(mqtt_callback)
+    client.subscribe(MAINPOWER_STATUS_TOPIC)
+    client.subscribe(PUMP_CONTROL_TOPIC)
+    client.subscribe(LED_CONTROL_TOPIC)
+    client.subscribe(SOIL_MOISTURE_TOPIC)
+    client.subscribe(DHT22_TOPIC)
+    client.subscribe(LDR_TOPIC)
+    client.subscribe(WATER_DENSITY_TOPIC)
+    client.subscribe(TARGET_LIGHT_TOPIC)
+    client.subscribe(LIGHT_SCALE_TOPIC)
+    client.subscribe(PUMP_MODE_TOPIC)
+    client.subscribe(LIGHT_MODE_TOPIC)
+    client.subscribe(MANUAL_PUMP_TOPIC)
+    client.subscribe(MANUAL_LIGHT_TOPIC)
+    print('MQTT broker connected.')
+
+def mqtt_callback(topic, msg):
+    global target_light, light_scale, pump_mode, light_mode, manual_pump, manual_light
+    msg = msg.decode()
+    print(f"Received MQTT message: topic={topic.decode()}, msg={msg}")  # Debug statement
+    if topic == TARGET_LIGHT_TOPIC.encode():
+        target_light = int(msg)
+    elif topic == LIGHT_SCALE_TOPIC.encode():
+        light_scale = float(msg)
+    elif topic == PUMP_MODE_TOPIC.encode():
+        pump_mode = msg
+    elif topic == LIGHT_MODE_TOPIC.encode():
+        light_mode = msg
+    elif topic == MANUAL_PUMP_TOPIC.encode():
+        manual_pump = bool(int(msg))
+        print(f"Updated manual_pump: {manual_pump}")  # Debug statement
+    elif topic == MANUAL_LIGHT_TOPIC.encode():
+        manual_light = bool(int(msg))
+        print(f"Updated manual_light: {manual_light}")  # Debug statement
+    elif topic == MAINPOWER_STATUS_TOPIC.encode():
+        main_power = int(msg)
+
+# Function to read soil moisture
+def read_moisture():
+    value = soil_moisture_sensor.read()
+    return (4095 - value) * 100 // 4095  # Convert to percentage
+
+# Function to read LDR (light sensor)
+def read_ldr():
+    return ldr.read()
+
+def update_min_max(ldr_value):
+    global min_value, max_value, min_count, max_count
+
+    if ldr_value < min_value:
+        min_count += 1
+        if min_count >= CONFIRM_COUNT:
+            min_value = ldr_value
+            min_count = 0
+    else:
+        min_count = 0  
+
+    if ldr_value > max_value:
+        max_count += 1
+        if max_count >= CONFIRM_COUNT:
+            max_value = ldr_value
+            max_count = 0
+    else:
+        max_count = 0
+        
+def find_ldr_value(ldr_value):
+    global min_value, max_value
+    return int(100 - (ldr_value - max_value * 100 / min_value - max_value))
+
+def adjust_brightness():
+    global bright_level
+    while current_light != prefered_light:
+        if (current_light > prefered_light) and (bright_level != 0):
+            bright_level -= 1
+        elif (current_light < prefered_light) and (bright_level != 255):
+            bright_level += 1
+        red.value(bright_level)
+        yellow.value(bright_level)
+        green.value(bright_level)
+        break
+
+# Initialize Wi-Fi and MQTT
+connect_wifi()
+connect_mqtt()
+
+# Main Loop
+while True:
+    try:
+        client.check_msg()  # Check for MQTT messages
+    except Exception as e:
+        print(f"MQTT Error: {e}")
+       
+    # Read sensor data
+    moisture = read_moisture()
+    ldr_value = read_ldr()
+    ldr_value = 100- (ldr_value / 15)
+    dht22_sensor.measure()
+    temp = dht22_sensor.temperature() / 27
+    humidity = dht22_sensor.humidity() / 24
+
+    # Print sensor data to console
+    print(f"Moisture: {moisture}%, LDR: {ldr_value}, Temp: {temp:.2f}°C, Humidity: {humidity:.2f}%")
+
+    # Publish sensor data to MQTT topics (with moisture check)
+    try:
+        # Check if moisture value differs significantly from the last published value
+        #if last_published_moisture is None or abs(moisture - last_published_moisture) >= 15:
+        #    client.publish(SOIL_MOISTURE_TOPIC, str(moisture))
+        #   last_published_moisture = moisture  # Update the last published value 
+        #else:
+            #pass
+        # Publish other sensor data (LDR, DHT22) unconditionally
+        client.publish(SOIL_MOISTURE_TOPIC, str(humidity))
+        client.publish(LDR_TOPIC, str(ldr_value))
+        client.publish(DHT22_TOPIC, f"{temp:.2f},{humidity:.2f}")
+    except Exception as e:
+        print(f"MQTT Publish Error: {e}")
+    print(main_power)
+    if main_power == 1:
+         main_power_relay.on()
+         ext_power_relay.off()
+    else:
+        ext_power_relay.off()
+        main_power_relay.on()
+    if pump_mode == "auto":
+        if moisture < 70:
+            pump_relay.on()  # Turn on pump in auto mode
+        else:
+            pump_relay.off()  # Turn off pump in auto mode
+    else:
+        pump_relay.value(1 if manual_pump else 0)  # Manual control
+
+    # Adjust LED brightness
+    update_min_max(ldr_value)
+    prefered_light = target_light
+    current_light = round(find_ldr_value(ldr_value))
+
+    if light_mode == "auto" and current_light != prefered_light:
+        adjust_brightness()
+    elif manual_light:
+        red.value(bright_level)
+        yellow.value(bright_level)
+        green.value(bright_level)
+    else:
+        red.value(0)
+        yellow.value(0)
+        green.value(0) 
+
+    time.sleep(0.1)
